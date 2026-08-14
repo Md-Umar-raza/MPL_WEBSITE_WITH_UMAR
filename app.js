@@ -1,641 +1,2607 @@
-/* 1=====================================================================
+/* =====================================================================
    MOKAMO PREMIER LEAGUE - SEASON 2 / 2027
-   Frontend logic — talks to the Code.gs Google Apps Script backend to
-   save registrations into a Google Sheet and upload payment
-   screenshots to Google Drive.
+   Frontend logic — Google Apps Script backend
+
+   UPDATED:
+   - Admin PIN: MPL-MOKAMO
+   - Player photo upload support
+   - Player photo sent to Google Apps Script / Google Drive
+   - Transaction ID OR payment screenshot is enough
+   - Registration success message after submission
+   - Pending message removed from success result
 ===================================================================== */
 
-const ADMIN_PIN = '2027'; // Reference only — the PIN is actually verified by Code.gs (Google Apps Script). Keep both in sync.
+const ADMIN_PIN = 'MPL-MOKAMO';
 
-// ⚠️ IMPORTANT: replace this with YOUR real UPI ID (VPA) before going live,
-// e.g. "9661926530@ybl" / "9661926530@okicici" / "yourname@upi".
 const UPI_ID = '9661926530@ybl';
 const UPI_PAYEE_NAME = 'Mokamo Premier League';
 
-/* ---------------------------------------------------------------------
-   EMAIL NOTIFICATIONS (EmailJS) — fill these in to get an email every
-   time someone registers. This is a free client-side email service,
-   no backend server needed.
 
-   Setup (takes ~5 minutes):
-   1. Go to https://www.emailjs.com and create a free account.
-   2. Add an Email Service (e.g. connect your Gmail) → copy the "Service ID".
-   3. Create an Email Template with a body using variables like:
-        {{player_name}} just registered.
-        Age: {{age}} | Jersey: {{jersey}}
-        Phone: {{phone}} | Email: {{email}}
-        Role: {{role}} | T-shirt: {{tshirt}} | City: {{city}}
-        Amount: ₹{{amount}} | Payment Ref: {{payment_ref}}
-        Registration ID: {{registration_id}}
-        Registered at: {{registered_at}}
-      Set the template's "To email" field to {{to_email}}.
-      Copy the "Template ID".
-   4. Go to Account → General → copy your "Public Key".
-   5. Paste all 4 values below.
---------------------------------------------------------------------- */
+/* =====================================================================
+   EMAILJS
+===================================================================== */
+
 const EMAILJS_PUBLIC_KEY  = 'HAAG1uFdaMt33DEPj';
 const EMAILJS_SERVICE_ID  = 'service_tz3yoya';
-const EMAILJS_TEMPLATE_ID = 'template_kwpqnfu'; 
-const ADMIN_EMAIL         = 'aliedit1821@gmail.com'; // where notifications should go
+const EMAILJS_TEMPLATE_ID = 'template_kwpqnfu';
+const ADMIN_EMAIL         = 'aliedit1821@gmail.com';
+
 
 function emailNotificationsReady(){
-  return EMAILJS_PUBLIC_KEY  && !EMAILJS_PUBLIC_KEY.startsWith('YOUR_')  &&
-         EMAILJS_SERVICE_ID  && !EMAILJS_SERVICE_ID.startsWith('YOUR_')  &&
-         EMAILJS_TEMPLATE_ID && !EMAILJS_TEMPLATE_ID.startsWith('YOUR_') &&
-         window.emailjs;
+
+  return EMAILJS_PUBLIC_KEY &&
+    !EMAILJS_PUBLIC_KEY.startsWith('YOUR_') &&
+    EMAILJS_SERVICE_ID &&
+    !EMAILJS_SERVICE_ID.startsWith('YOUR_') &&
+    EMAILJS_TEMPLATE_ID &&
+    !EMAILJS_TEMPLATE_ID.startsWith('YOUR_') &&
+    window.emailjs;
+
 }
+
 
 if (emailNotificationsReady()) {
+
   emailjs.init(EMAILJS_PUBLIC_KEY);
+
 }
+
 
 function notifyAdminByEmail(entry){
+
   if (!emailNotificationsReady()) {
-    console.warn('Email notifications are not configured yet — see the EMAILJS_* constants near the top of the script.');
+
+    console.warn(
+      'Email notifications are not configured.'
+    );
+
     return;
+
   }
 
+
   const params = {
-    to_email: ADMIN_EMAIL,
-    registration_id: entry.id,
-    player_name: (entry.firstName + ' ' + entry.lastName).trim(),
-    age: entry.age,
-    jersey: entry.jersey,
-    phone: entry.phone,
-    email: entry.email || 'Not provided',
-    role: entry.role,
-    tshirt: entry.tshirt,
-    city: entry.city,
-    amount: entry.amount,
-    payment_ref: entry.paymentRef || 'Not provided',
-    registered_at: entry.registeredAt
+
+    to_email:
+      ADMIN_EMAIL,
+
+    registration_id:
+      entry.id,
+
+    player_name:
+      (entry.firstName + ' ' + entry.lastName).trim(),
+
+    age:
+      entry.age,
+
+    jersey:
+      entry.jersey,
+
+    phone:
+      entry.phone,
+
+    email:
+      entry.email || 'Not provided',
+
+    role:
+      entry.role,
+
+    tshirt:
+      entry.tshirt,
+
+    city:
+      entry.city,
+
+    amount:
+      entry.amount,
+
+    payment_ref:
+      entry.paymentRef || 'Not provided',
+
+    registered_at:
+      entry.registeredAt
+
   };
 
-  emailjs.send(EMAILJS_SERVICE_ID, EMAILJS_TEMPLATE_ID, params)
-    .then(() => console.log('Admin notified by email for', entry.id))
-    .catch((err) => console.error('Email notification failed:', err));
+
+  emailjs.send(
+    EMAILJS_SERVICE_ID,
+    EMAILJS_TEMPLATE_ID,
+    params
+  )
+  .then(() => {
+
+    console.log(
+      'Admin notified by email for',
+      entry.id
+    );
+
+  })
+  .catch((err) => {
+
+    console.error(
+      'Email notification failed:',
+      err
+    );
+
+  });
+
 }
 
-// ⚠️ IMPORTANT: after you deploy the Google Apps Script (Code.gs) as a
-// Web App, paste its URL here. This is what makes registrations save to
-// your Google Sheet instead of the browser.
-const API_URL = 'https://script.google.com/macros/s/AKfycbxhXLRdU-0Ft9-KJBUkxBREQxNLPHxK8tKj6Y-wmL6mdMFRDkaGrGTmn-GzY2PeH003/exec';
+
+/* =====================================================================
+   GOOGLE APPS SCRIPT API
+===================================================================== */
+
+const API_URL =
+'https://script.google.com/macros/s/AKfycbxhXLRdU-0Ft9-KJBUkxBREQxNLPHxK8tKj6Y-wmL6mdMFRDkaGrGTmn-GzY2PeH003/exec';
+
 
 const FEE = 99.18;
 
+
 let allRegs = [];
+
 let currentAdminPin = '';
+
 window.registrationSubmitted = false;
 
-function showView(view){
-  const registerView = document.getElementById('registerView');
-  const adminView = document.getElementById('adminView');
-  const navRegister = document.getElementById('navRegister');
-  const navAdmin = document.getElementById('navAdmin');
 
-  if (registerView) registerView.classList.toggle('hidden', view !== 'register');
-  if (adminView) adminView.classList.toggle('hidden', view !== 'admin');
-  if (navRegister) navRegister.classList.toggle('active', view === 'register');
-  if (navAdmin) navAdmin.classList.toggle('active', view === 'admin');
+/* =====================================================================
+   VIEW
+===================================================================== */
+
+function showView(view){
+
+  const registerView =
+    document.getElementById(
+      'registerView'
+    );
+
+  const adminView =
+    document.getElementById(
+      'adminView'
+    );
+
+  const navRegister =
+    document.getElementById(
+      'navRegister'
+    );
+
+  const navAdmin =
+    document.getElementById(
+      'navAdmin'
+    );
+
+
+  if (registerView) {
+
+    registerView.classList.toggle(
+      'hidden',
+      view !== 'register'
+    );
+
+  }
+
+
+  if (adminView) {
+
+    adminView.classList.toggle(
+      'hidden',
+      view !== 'admin'
+    );
+
+  }
+
+
+  if (navRegister) {
+
+    navRegister.classList.toggle(
+      'active',
+      view === 'register'
+    );
+
+  }
+
+
+  if (navAdmin) {
+
+    navAdmin.classList.toggle(
+      'active',
+      view === 'admin'
+    );
+
+  }
+
 
   if (view === 'admin') {
-    const loginCard = document.getElementById('loginCard');
-    const dashCard = document.getElementById('dashCard');
 
-    if (loginCard && dashCard && !dashCard.classList.contains('hidden')) {
+    const loginCard =
+      document.getElementById(
+        'loginCard'
+      );
+
+    const dashCard =
+      document.getElementById(
+        'dashCard'
+      );
+
+
+    if (
+      loginCard &&
+      dashCard &&
+      !dashCard.classList.contains(
+        'hidden'
+      )
+    ){
+
       loadRegistrations();
+
     }
+
   }
+
 }
+
+
+/* =====================================================================
+   STEPS
+===================================================================== */
 
 function setActiveStep(step){
-  document.getElementById('stepDot1').classList.toggle('active', step === 1);
-  document.getElementById('stepDot2').classList.toggle('active', step === 2);
-  document.getElementById('stepDot3').classList.toggle('active', step === 3);
+
+  const step1 =
+    document.getElementById(
+      'stepDot1'
+    );
+
+  const step2 =
+    document.getElementById(
+      'stepDot2'
+    );
+
+  const step3 =
+    document.getElementById(
+      'stepDot3'
+    );
+
+
+  if (step1)
+    step1.classList.toggle(
+      'active',
+      step === 1
+    );
+
+
+  if (step2)
+    step2.classList.toggle(
+      'active',
+      step === 2
+    );
+
+
+  if (step3)
+    step3.classList.toggle(
+      'active',
+      step === 3
+    );
+
 }
+
+
+/* =====================================================================
+   REVIEW
+===================================================================== */
 
 function refreshReview(){
-  const role = document.querySelector('input[name="role"]:checked');
 
-  document.getElementById('reviewName').textContent =
-    (document.getElementById('firstName').value.trim() + ' ' +
-     document.getElementById('lastName').value.trim()).trim() || '-';
-  document.getElementById('reviewAge').textContent = document.getElementById('age').value || '-';
-  document.getElementById('reviewJersey').textContent = document.getElementById('jersey').value || '-';
-  document.getElementById('reviewPhone').textContent = document.getElementById('phone').value.trim() || '-';
-  document.getElementById('reviewEmail').textContent = document.getElementById('email').value.trim() || '-';
-  document.getElementById('reviewRole').textContent = role ? role.value : '-';
-  document.getElementById('reviewTshirt').textContent = document.getElementById('tshirt').value || '-';
-  document.getElementById('reviewCity').textContent = document.getElementById('city').value.trim() || '-';
-  document.getElementById('reviewPaymentRef').textContent = document.getElementById('paymentRef').value.trim() || '-';
-  document.getElementById('reviewPaymentTo').textContent = '₹' + FEE.toFixed(2) + ' → ' + UPI_ID;
+  const role =
+    document.querySelector(
+      'input[name="role"]:checked'
+    );
 
-  const box = document.getElementById('reviewScreenshotBox');
+
+  document.getElementById(
+    'reviewName'
+  ).textContent =
+
+    (
+      document.getElementById(
+        'firstName'
+      ).value.trim() +
+
+      ' ' +
+
+      document.getElementById(
+        'lastName'
+      ).value.trim()
+
+    ).trim() || '-';
+
+
+  document.getElementById(
+    'reviewAge'
+  ).textContent =
+
+    document.getElementById(
+      'age'
+    ).value || '-';
+
+
+  document.getElementById(
+    'reviewJersey'
+  ).textContent =
+
+    document.getElementById(
+      'jersey'
+    ).value || '-';
+
+
+  document.getElementById(
+    'reviewPhone'
+  ).textContent =
+
+    document.getElementById(
+      'phone'
+    ).value.trim() || '-';
+
+
+  document.getElementById(
+    'reviewEmail'
+  ).textContent =
+
+    document.getElementById(
+      'email'
+    ).value.trim() || '-';
+
+
+  document.getElementById(
+    'reviewRole'
+  ).textContent =
+
+    role
+      ? role.value
+      : '-';
+
+
+  document.getElementById(
+    'reviewTshirt'
+  ).textContent =
+
+    document.getElementById(
+      'tshirt'
+    ).value || '-';
+
+
+  document.getElementById(
+    'reviewCity'
+  ).textContent =
+
+    document.getElementById(
+      'city'
+    ).value.trim() || '-';
+
+
+  document.getElementById(
+    'reviewPaymentRef'
+  ).textContent =
+
+    document.getElementById(
+      'paymentRef'
+    ).value.trim() || '-';
+
+
+  document.getElementById(
+    'reviewPaymentTo'
+  ).textContent =
+
+    '₹' +
+    FEE.toFixed(2) +
+    ' → ' +
+    UPI_ID;
+
+
+  const box =
+    document.getElementById(
+      'reviewScreenshotBox'
+    );
+
+
+  if (!box) return;
+
+
   box.innerHTML = '';
 
-  const file = document.getElementById('paymentScreenshot').files[0];
-  if (file) {
-    const img = document.createElement('img');
-    img.alt = 'Payment screenshot';
-    img.src = URL.createObjectURL(file);
-    box.appendChild(img);
-  } else {
-    box.textContent = 'No payment screenshot selected.';
+
+  const playerPhotoInput =
+    document.getElementById(
+      'playerPhoto'
+    );
+
+
+  const playerPhotoFile =
+    playerPhotoInput &&
+    playerPhotoInput.files[0];
+
+
+  if (playerPhotoFile){
+
+    const title =
+      document.createElement(
+        'div'
+      );
+
+
+    title.textContent =
+      'Player Photo';
+
+
+    title.style.cssText =
+      'font-size:11px;' +
+      'color:var(--muted);' +
+      'text-transform:uppercase;' +
+      'letter-spacing:.5px;' +
+      'margin-bottom:6px;';
+
+
+    box.appendChild(title);
+
+
+    const playerImg =
+      document.createElement(
+        'img'
+      );
+
+
+    playerImg.alt =
+      'Player photo';
+
+
+    playerImg.src =
+      URL.createObjectURL(
+        playerPhotoFile
+      );
+
+
+    playerImg.style.cssText =
+      'max-width:180px;' +
+      'max-height:220px;' +
+      'object-fit:cover;' +
+      'border-radius:10px;' +
+      'margin-bottom:12px;';
+
+
+    box.appendChild(
+      playerImg
+    );
+
   }
+
+
+  const screenshotInput =
+    document.getElementById(
+      'paymentScreenshot'
+    );
+
+
+  const screenshot =
+    screenshotInput &&
+    screenshotInput.files[0];
+
+
+  if (screenshot){
+
+    const title =
+      document.createElement(
+        'div'
+      );
+
+
+    title.textContent =
+      'Payment Screenshot';
+
+
+    title.style.cssText =
+      'font-size:11px;' +
+      'color:var(--muted);' +
+      'text-transform:uppercase;' +
+      'letter-spacing:.5px;' +
+      'margin-bottom:6px;';
+
+
+    box.appendChild(title);
+
+
+    const img =
+      document.createElement(
+        'img'
+      );
+
+
+    img.alt =
+      'Payment screenshot';
+
+
+    img.src =
+      URL.createObjectURL(
+        screenshot
+      );
+
+
+    img.style.cssText =
+      'max-width:100%;' +
+      'max-height:260px;' +
+      'border-radius:10px;' +
+      'border:1px solid var(--border-strong);';
+
+
+    box.appendChild(img);
+
+  }
+
+
+  if (
+    !playerPhotoFile &&
+    !screenshot
+  ){
+
+    box.textContent =
+      'No image selected.';
+
+  }
+
 }
+
+
+/* =====================================================================
+   STEP NAVIGATION
+===================================================================== */
 
 function goToStep(step){
-  if (window.registrationSubmitted) return;
+
+  if (
+    window.registrationSubmitted
+  ){
+
+    return;
+
+  }
+
 
   if (step === 1){
-    document.getElementById('cricketForm').classList.remove('hidden');
-    document.getElementById('paymentView').classList.add('hidden');
-    document.getElementById('successCard').classList.add('hidden');
+
+    document.getElementById(
+      'cricketForm'
+    ).classList.remove(
+      'hidden'
+    );
+
+
+    document.getElementById(
+      'paymentView'
+    ).classList.add(
+      'hidden'
+    );
+
+
+    document.getElementById(
+      'successCard'
+    ).classList.add(
+      'hidden'
+    );
+
+
     setActiveStep(1);
+
     return;
+
   }
+
 
   if (step === 2){
-    const form = document.getElementById('cricketForm');
 
-    if (!form.checkValidity()) {
+    const form =
+      document.getElementById(
+        'cricketForm'
+      );
+
+
+    if (!form.checkValidity()){
+
       form.reportValidity();
+
       setActiveStep(1);
+
       return;
+
     }
 
-    if (!document.getElementById('terms').checked) {
-      alert('Please agree to the terms and conditions first.');
+
+    if (
+      !document.getElementById(
+        'terms'
+      ).checked
+    ){
+
+      alert(
+        'Please agree to the terms and conditions first.'
+      );
+
       setActiveStep(1);
+
       return;
+
     }
 
-    document.getElementById('cricketForm').classList.add('hidden');
-    document.getElementById('paymentView').classList.remove('hidden');
-    document.getElementById('successCard').classList.add('hidden');
+
+    document.getElementById(
+      'cricketForm'
+    ).classList.add(
+      'hidden'
+    );
+
+
+    document.getElementById(
+      'paymentView'
+    ).classList.remove(
+      'hidden'
+    );
+
+
+    document.getElementById(
+      'successCard'
+    ).classList.add(
+      'hidden'
+    );
+
+
     setActiveStep(2);
+
     generateUpiQr();
+
     return;
+
   }
+
 
   if (step === 3){
-    const form = document.getElementById('cricketForm');
 
-    if (!form.checkValidity()) {
+    const form =
+      document.getElementById(
+        'cricketForm'
+      );
+
+
+    if (!form.checkValidity()){
+
       form.reportValidity();
+
       setActiveStep(1);
+
       return;
+
     }
 
-    if (!document.getElementById('terms').checked) {
-      alert('Please agree to the terms and conditions first.');
+
+    if (
+      !document.getElementById(
+        'terms'
+      ).checked
+    ){
+
+      alert(
+        'Please agree to the terms and conditions first.'
+      );
+
       setActiveStep(1);
+
       return;
+
     }
 
-    const paymentRef = document.getElementById('paymentRef').value.trim();
-    const screenshot = document.getElementById('paymentScreenshot').files[0];
 
-    if (!paymentRef) {
-      alert('Please enter the transaction ID / UTR.');
+    const paymentRef =
+      document.getElementById(
+        'paymentRef'
+      ).value.trim();
+
+
+    const screenshotInput =
+      document.getElementById(
+        'paymentScreenshot'
+      );
+
+
+    const screenshot =
+      screenshotInput &&
+      screenshotInput.files[0];
+
+
+    /*
+     * IMPORTANT:
+     * Transaction ID OR Screenshot
+     * dono mein se koi ek enough hai.
+     */
+
+    if (
+      !paymentRef &&
+      !screenshot
+    ){
+
+      alert(
+        'Please enter the transaction ID / UTR OR upload the successful payment screenshot.'
+      );
+
       setActiveStep(2);
+
       return;
+
     }
 
-    if (!screenshot) {
-      alert('Please upload the successful payment screenshot.');
-      setActiveStep(2);
-      return;
-    }
 
     refreshReview();
-    document.getElementById('cricketForm').classList.add('hidden');
-    document.getElementById('paymentView').classList.add('hidden');
-    document.getElementById('successCard').classList.remove('hidden');
-    document.getElementById('reviewPanel').classList.remove('hidden');
-    document.getElementById('submittedPanel').classList.add('hidden');
+
+
+    document.getElementById(
+      'cricketForm'
+    ).classList.add(
+      'hidden'
+    );
+
+
+    document.getElementById(
+      'paymentView'
+    ).classList.add(
+      'hidden'
+    );
+
+
+    document.getElementById(
+      'successCard'
+    ).classList.remove(
+      'hidden'
+    );
+
+
+    document.getElementById(
+      'reviewPanel'
+    ).classList.remove(
+      'hidden'
+    );
+
+
+    document.getElementById(
+      'submittedPanel'
+    ).classList.add(
+      'hidden'
+    );
+
+
     setActiveStep(3);
+
   }
+
 }
+
 
 function goToPayment(){
+
   goToStep(2);
+
 }
+
 
 function backToDetails(){
+
   goToStep(1);
+
 }
+
+
+/* =====================================================================
+   UPI
+===================================================================== */
 
 function buildUpiUri(){
-  const note = encodeURIComponent('Mokamo Premier League Season 2 Registration 2027');
-  const pn = encodeURIComponent(UPI_PAYEE_NAME);
-  const pa = encodeURIComponent(UPI_ID);
-  return 'upi://pay?pa=' + pa + '&pn=' + pn + '&am=' + FEE.toFixed(2) + '&cu=INR&tn=' + note;
+
+  const note =
+    encodeURIComponent(
+      'Mokamo Premier League Season 2 Registration 2027'
+    );
+
+
+  const pn =
+    encodeURIComponent(
+      UPI_PAYEE_NAME
+    );
+
+
+  const pa =
+    encodeURIComponent(
+      UPI_ID
+    );
+
+
+  return (
+    'upi://pay?pa=' +
+    pa +
+    '&pn=' +
+    pn +
+    '&am=' +
+    FEE.toFixed(2) +
+    '&cu=INR&tn=' +
+    note
+  );
+
 }
+
 
 function generateUpiQr(){
-  const img = document.getElementById('upiQrImg');
-  const idText = document.getElementById('upiIdText');
 
-  if (!img || !idText) return;
+  const img =
+    document.getElementById(
+      'upiQrImg'
+    );
 
-  const upiUri = buildUpiUri();
-  const qrApiUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=' + encodeURIComponent(upiUri);
 
-  img.src = qrApiUrl;
-  idText.textContent = UPI_ID;
+  const idText =
+    document.getElementById(
+      'upiIdText'
+    );
+
+
+  if (
+    !img ||
+    !idText
+  ){
+
+    return;
+
+  }
+
+
+  const upiUri =
+    buildUpiUri();
+
+
+  const qrApiUrl =
+    'https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=' +
+    encodeURIComponent(
+      upiUri
+    );
+
+
+  img.src =
+    qrApiUrl;
+
+
+  idText.textContent =
+    UPI_ID;
+
 }
+
 
 function copyUpiId(){
-  const msg = document.getElementById('upiCopiedMsg');
 
-  const showCopied = () => {
-    if (!msg) return;
-    msg.style.visibility = 'visible';
-    setTimeout(() => { msg.style.visibility = 'hidden'; }, 1500);
-  };
+  const msg =
+    document.getElementById(
+      'upiCopiedMsg'
+    );
 
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(UPI_ID).then(showCopied).catch(() => {
-      alert('UPI ID: ' + UPI_ID);
-    });
+
+  const showCopied =
+    () => {
+
+      if (!msg) return;
+
+      msg.style.visibility =
+        'visible';
+
+
+      setTimeout(
+        () => {
+
+          msg.style.visibility =
+            'hidden';
+
+        },
+        1500
+      );
+
+    };
+
+
+  if (
+    navigator.clipboard &&
+    navigator.clipboard.writeText
+  ){
+
+    navigator.clipboard
+      .writeText(UPI_ID)
+      .then(
+        showCopied
+      )
+      .catch(
+        () => {
+
+          alert(
+            'UPI ID: ' +
+            UPI_ID
+          );
+
+        }
+      );
+
   } else {
-    alert('UPI ID: ' + UPI_ID);
+
+    alert(
+      'UPI ID: ' +
+      UPI_ID
+    );
+
   }
+
 }
 
+
+/* =====================================================================
+   PAYMENT SCREENSHOT PREVIEW
+===================================================================== */
+
 function previewPaymentScreenshot(event){
-  const file = event.target.files[0];
-  const box = document.getElementById('paymentScreenshotPreview');
+
+  const file =
+    event.target.files[0];
+
+
+  const box =
+    document.getElementById(
+      'paymentScreenshotPreview'
+    );
+
+
+  if (!box) return;
+
 
   box.innerHTML = '';
 
-  if (!file) {
-    box.classList.add('hidden');
+
+  if (!file){
+
+    box.classList.add(
+      'hidden'
+    );
+
     return;
+
   }
 
-  if (!file.type.startsWith('image/')) {
-    alert('Please select an image file.');
-    event.target.value = '';
-    box.classList.add('hidden');
+
+  if (
+    !file.type.startsWith(
+      'image/'
+    )
+  ){
+
+    alert(
+      'Please select an image file.'
+    );
+
+
+    event.target.value =
+      '';
+
+
+    box.classList.add(
+      'hidden'
+    );
+
+
     return;
+
   }
 
-  const img = document.createElement('img');
-  img.src = URL.createObjectURL(file);
-  img.alt = 'Payment screenshot preview';
 
-  box.appendChild(img);
-  box.classList.remove('hidden');
+  const img =
+    document.createElement(
+      'img'
+    );
+
+
+  img.src =
+    URL.createObjectURL(
+      file
+    );
+
+
+  img.alt =
+    'Payment screenshot preview';
+
+
+  box.appendChild(
+    img
+  );
+
+
+  box.classList.remove(
+    'hidden'
+  );
+
 }
 
-/* ---------------------------------------------------------------------
-   STORAGE LAYER — Google Sheet via Apps Script Web App
-   Every registration is sent to the Apps Script backend (Code.gs),
-   which appends a row to a Google Sheet and uploads the payment
-   screenshot to Google Drive. This means data survives even if the
-   user clears their browser, and the admin can see every registration
-   from any device.
---------------------------------------------------------------------- */
+
+/* =====================================================================
+   PLAYER PHOTO PREVIEW
+===================================================================== */
+
+function previewPlayerPhoto(event){
+
+  const file =
+    event.target.files[0];
+
+
+  const box =
+    document.getElementById(
+      'playerPhotoPreview'
+    );
+
+
+  if (!box) return;
+
+
+  box.innerHTML = '';
+
+
+  if (!file){
+
+    box.classList.add(
+      'hidden'
+    );
+
+    return;
+
+  }
+
+
+  if (
+    !file.type.startsWith(
+      'image/'
+    )
+  ){
+
+    alert(
+      'Please select an image file.'
+    );
+
+
+    event.target.value =
+      '';
+
+
+    box.classList.add(
+      'hidden'
+    );
+
+
+    return;
+
+  }
+
+
+  const img =
+    document.createElement(
+      'img'
+    );
+
+
+  img.src =
+    URL.createObjectURL(
+      file
+    );
+
+
+  img.alt =
+    'Player photo preview';
+
+
+  img.style.maxWidth =
+    '100%';
+
+
+  img.style.maxHeight =
+    '240px';
+
+
+  img.style.borderRadius =
+    '10px';
+
+
+  box.appendChild(
+    img
+  );
+
+
+  box.classList.remove(
+    'hidden'
+  );
+
+}
+
+
+/* =====================================================================
+   API
+===================================================================== */
 
 function apiReady(){
-  return API_URL && !API_URL.includes('PASTE_YOUR_GOOGLE_APPS_SCRIPT_WEB_APP_URL_HERE');
+
+  return (
+    API_URL &&
+    !API_URL.includes(
+      'PASTE_YOUR_GOOGLE_APPS_SCRIPT_WEB_APP_URL_HERE'
+    )
+  );
+
 }
 
-async function apiRequest(payload){
-  if (!apiReady()) {
-    throw new Error('The Google Sheet backend is not connected yet. Deploy Code.gs and paste the Web App URL into API_URL.');
+
+async function apiRequest(
+  payload
+){
+
+  if (!apiReady()){
+
+    throw new Error(
+      'The Google Sheet backend is not connected yet.'
+    );
+
   }
 
-  const response = await fetch(API_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // avoids CORS preflight on Apps Script
-    body: JSON.stringify(payload)
+
+  const response =
+    await fetch(
+      API_URL,
+      {
+        method:
+          'POST',
+
+        headers: {
+          'Content-Type':
+            'text/plain;charset=utf-8'
+        },
+
+        body:
+          JSON.stringify(
+            payload
+          )
+
+      }
+    );
+
+
+  const data =
+    await response.json();
+
+
+  if (!data.ok){
+
+    throw new Error(
+      data.error ||
+      'Server request failed.'
+    );
+
+  }
+
+
+  return data;
+
+}
+
+
+async function getAllRegs(
+  pin
+){
+
+  const data =
+    await apiRequest({
+      action:
+        'list',
+
+      pin:
+        pin
+    });
+
+
+  return (
+    data.registrations ||
+    []
+  );
+
+}
+
+
+async function saveRegistration(
+  entry
+){
+
+  return await apiRequest({
+
+    action:
+      'submit',
+
+    registration:
+      entry
+
   });
 
-  const data = await response.json();
-
-  if (!data.ok) {
-    throw new Error(data.error || 'Server request failed.');
-  }
-
-  return data;
 }
 
-async function getAllRegs(pin){
-  const data = await apiRequest({ action: 'list', pin: pin });
-  return data.registrations || [];
+
+async function verifyRegistration(
+  id,
+  pin
+){
+
+  return await apiRequest({
+
+    action:
+      'verify',
+
+    id:
+      id,
+
+    pin:
+      pin
+
+  });
+
 }
 
-async function saveRegistration(entry){
-  const data = await apiRequest({ action: 'submit', registration: entry });
-  return data;
-}
 
-async function verifyRegistration(id, pin){
-  return await apiRequest({ action: 'verify', id: id, pin: pin });
-}
+/* =====================================================================
+   FILE TO BASE64
+===================================================================== */
 
-function fileToDataURL(file){
-  return new Promise((resolve, reject) => {
-    if (!file) {
-      resolve('');
-      return;
+function fileToDataURL(
+  file
+){
+
+  return new Promise(
+    (resolve, reject) => {
+
+      if (!file){
+
+        resolve('');
+
+        return;
+
+      }
+
+
+      const reader =
+        new FileReader();
+
+
+      reader.onload =
+        () => {
+
+          resolve(
+            reader.result
+          );
+
+        };
+
+
+      reader.onerror =
+        () => {
+
+          reject(
+            new Error(
+              'Could not read the selected image.'
+            )
+          );
+
+        };
+
+
+      reader.readAsDataURL(
+        file
+      );
+
     }
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(new Error('Could not read the payment screenshot.'));
-    reader.readAsDataURL(file);
-  });
+  );
+
 }
+
+
+/* =====================================================================
+   GET FORM DATA
+===================================================================== */
 
 async function getFormData(){
-  const role = document.querySelector('input[name="role"]:checked');
-  const screenshotFile = document.getElementById('paymentScreenshot').files[0];
+
+  const role =
+    document.querySelector(
+      'input[name="role"]:checked'
+    );
+
+
+  const screenshotInput =
+    document.getElementById(
+      'paymentScreenshot'
+    );
+
+
+  const screenshotFile =
+    screenshotInput &&
+    screenshotInput.files[0];
+
+
+  const playerPhotoInput =
+    document.getElementById(
+      'playerPhoto'
+    );
+
+
+  const playerPhotoFile =
+    playerPhotoInput &&
+    playerPhotoInput.files[0];
+
 
   return {
-    id: 'REG-' + Date.now(),
-    firstName: document.getElementById('firstName').value.trim(),
-    lastName: document.getElementById('lastName').value.trim(),
-    age: document.getElementById('age').value,
-    jersey: document.getElementById('jersey').value,
-    phone: document.getElementById('phone').value.trim(),
-    email: document.getElementById('email').value.trim(),
-    role: role ? role.value : '',
-    tshirt: document.getElementById('tshirt').value,
-    state: document.getElementById('state').value.trim(),
-    city: document.getElementById('city').value.trim(),
-    paymentRef: document.getElementById('paymentRef').value.trim(),
-    paymentScreenshot: await fileToDataURL(screenshotFile),
-    paymentScreenshotName: screenshotFile ? screenshotFile.name : '',
-    amount: FEE,
-    paid: false,
-    paymentStatus: 'Pending',
-    registeredAt: new Date().toISOString()
+
+    id:
+      'REG-' +
+      Date.now(),
+
+
+    firstName:
+      document.getElementById(
+        'firstName'
+      ).value.trim(),
+
+
+    lastName:
+      document.getElementById(
+        'lastName'
+      ).value.trim(),
+
+
+    age:
+      document.getElementById(
+        'age'
+      ).value,
+
+
+    jersey:
+      document.getElementById(
+        'jersey'
+      ).value,
+
+
+    phone:
+      document.getElementById(
+        'phone'
+      ).value.trim(),
+
+
+    email:
+      document.getElementById(
+        'email'
+      ).value.trim(),
+
+
+    role:
+      role
+        ? role.value
+        : '',
+
+
+    tshirt:
+      document.getElementById(
+        'tshirt'
+      ).value,
+
+
+    state:
+      document.getElementById(
+        'state'
+      ).value.trim(),
+
+
+    city:
+      document.getElementById(
+        'city'
+      ).value.trim(),
+
+
+    /* PLAYER PHOTO */
+
+    playerPhoto:
+      await fileToDataURL(
+        playerPhotoFile
+      ),
+
+
+    playerPhotoName:
+      playerPhotoFile
+        ? playerPhotoFile.name
+        : '',
+
+
+    /* PAYMENT */
+
+    paymentRef:
+      document.getElementById(
+        'paymentRef'
+      ).value.trim(),
+
+
+    paymentScreenshot:
+      await fileToDataURL(
+        screenshotFile
+      ),
+
+
+    paymentScreenshotName:
+      screenshotFile
+        ? screenshotFile.name
+        : '',
+
+
+    amount:
+      FEE,
+
+
+    paid:
+      false,
+
+
+    paymentStatus:
+      'Pending',
+
+
+    registeredAt:
+      new Date().toISOString()
+
   };
+
 }
+
+
+/* =====================================================================
+   SUBMIT REGISTRATION
+===================================================================== */
 
 async function submitRegistration(){
-  if (window.registrationSubmitted) return;
 
-  const paymentRef = document.getElementById('paymentRef').value.trim();
-  const screenshot = document.getElementById('paymentScreenshot').files[0];
+  if (
+    window.registrationSubmitted
+  ){
 
-  if (!paymentRef) {
-    alert('Please enter the transaction ID / UTR.');
+    return;
+
+  }
+
+
+  const paymentRef =
+    document.getElementById(
+      'paymentRef'
+    ).value.trim();
+
+
+  const screenshotInput =
+    document.getElementById(
+      'paymentScreenshot'
+    );
+
+
+  const screenshot =
+    screenshotInput &&
+    screenshotInput.files[0];
+
+
+  /*
+   * PAYMENT CONDITION:
+   * Transaction ID OR Screenshot
+   * koi ek hone par form submit allowed hai.
+   */
+
+  if (
+    !paymentRef &&
+    !screenshot
+  ){
+
+    alert(
+      'Please enter the transaction ID / UTR OR upload the successful payment screenshot.'
+    );
+
+
     goToStep(2);
+
     return;
+
   }
 
-  if (!screenshot) {
-    alert('Please upload the successful payment screenshot.');
-    goToStep(2);
+
+  if (!apiReady()){
+
+    alert(
+      'The registration server is not connected yet. Please check the Apps Script Web App URL.'
+    );
+
+
     return;
+
   }
 
-  if (!apiReady()) {
-    alert('The registration server is not connected yet. Deploy Code.gs to Google Apps Script and paste the Web App URL into API_URL in the code.');
-    return;
+
+  const button =
+    document.getElementById(
+      'finalSubmitBtn'
+    );
+
+
+  if (button){
+
+    button.disabled =
+      true;
+
+
+    button.textContent =
+      'Submitting...';
+
   }
 
-  const button = document.getElementById('finalSubmitBtn');
-  button.disabled = true;
-  button.textContent = 'Submitting...';
 
   try {
-    const entry = await getFormData();
-    const result = await saveRegistration(entry);
 
-    notifyAdminByEmail(entry);
+    const entry =
+      await getFormData();
 
-    window.registrationSubmitted = true;
 
-    document.getElementById('reviewPanel').classList.add('hidden');
-    document.getElementById('submittedPanel').classList.remove('hidden');
+    const result =
+      await saveRegistration(
+        entry
+      );
 
-    document.getElementById('successMsg').textContent =
-      entry.firstName +
-      ', your registration has been submitted for Mokamo Premier League Season 2 (2027). ' +
-      'Registration ID: ' + (result.id || entry.id) +
-      '. Payment is pending admin verification.';
+
+    /*
+     * Email notification
+     */
+
+    notifyAdminByEmail(
+      entry
+    );
+
+
+    window.registrationSubmitted =
+      true;
+
+
+    /*
+     * Hide review
+     */
+
+    const reviewPanel =
+      document.getElementById(
+        'reviewPanel'
+      );
+
+
+    const submittedPanel =
+      document.getElementById(
+        'submittedPanel'
+      );
+
+
+    if (reviewPanel){
+
+      reviewPanel.classList.add(
+        'hidden'
+      );
+
+    }
+
+
+    if (submittedPanel){
+
+      submittedPanel.classList.remove(
+        'hidden'
+      );
+
+    }
+
+
+    /*
+     * SUCCESS MESSAGE
+     *
+     * No payment pending message.
+     */
+
+    const successMsg =
+      document.getElementById(
+        'successMsg'
+      );
+
+
+    if (successMsg){
+
+      successMsg.textContent =
+
+        entry.firstName +
+
+        ', Registration successfully submitted for Mokamo Premier League Season 2 (2027). ' +
+
+        'Your Registration ID is ' +
+
+        (
+          result.id ||
+          entry.id
+        ) +
+
+        '.';
+
+    }
+
+
+    /*
+     * If pending tag exists in old HTML,
+     * hide it so success page does not show pending.
+     */
+
+    const pendingTag =
+      document.querySelector(
+        '#submittedPanel .pending-tag'
+      );
+
+
+    if (pendingTag){
+
+      pendingTag.style.display =
+        'none';
+
+    }
+
 
   } catch (e) {
+
     console.error(e);
-    alert(e.message || 'Registration could not be submitted.');
+
+
+    alert(
+      e.message ||
+      'Registration could not be submitted.'
+    );
+
+
   } finally {
-    button.disabled = false;
-    button.textContent = 'Submit Registration';
+
+    if (button){
+
+      button.disabled =
+        false;
+
+
+      button.textContent =
+        'Submit Registration';
+
+    }
+
   }
+
 }
+
+
+/* =====================================================================
+   ADMIN LOGIN
+===================================================================== */
 
 async function checkPin(){
-  const input = document.getElementById('adminPin');
-  const loginCard = document.getElementById('loginCard');
-  const dashCard = document.getElementById('dashCard');
 
-  if (!input || !loginCard || !dashCard) return;
+  const input =
+    document.getElementById(
+      'adminPin'
+    );
 
-  const val = input.value.trim();
 
-  if (!val) {
-    alert('Enter the admin PIN.');
+  const loginCard =
+    document.getElementById(
+      'loginCard'
+    );
+
+
+  const dashCard =
+    document.getElementById(
+      'dashCard'
+    );
+
+
+  if (
+    !input ||
+    !loginCard ||
+    !dashCard
+  ){
+
     return;
+
   }
 
-  if (!apiReady()) {
-    alert('The Google Sheet backend is not connected yet. Deploy Code.gs and paste the Web App URL into API_URL in the code.');
+
+  const val =
+    input.value.trim();
+
+
+  if (!val){
+
+    alert(
+      'Enter the admin PIN.'
+    );
+
+
     return;
+
   }
 
-  const button = input.closest('.login-box')?.querySelector('button');
-  if (button) button.disabled = true;
+
+  if (!apiReady()){
+
+    alert(
+      'The Google Sheet backend is not connected yet.'
+    );
+
+
+    return;
+
+  }
+
+
+  const button =
+    input
+      .closest(
+        '.login-box'
+      )
+      ?.querySelector(
+        'button'
+      );
+
+
+  if (button){
+
+    button.disabled =
+      true;
+
+  }
+
 
   try {
-    allRegs = await getAllRegs(val);
-    currentAdminPin = val;
 
-    loginCard.classList.add('hidden');
-    dashCard.classList.remove('hidden');
+    allRegs =
+      await getAllRegs(
+        val
+      );
+
+
+    currentAdminPin =
+      val;
+
+
+    loginCard.classList.add(
+      'hidden'
+    );
+
+
+    dashCard.classList.remove(
+      'hidden'
+    );
+
 
     renderStats();
+
     renderTable();
+
+
   } catch (e) {
-    alert(e.message || 'Wrong PIN or server error.');
+
+    alert(
+      e.message ||
+      'Wrong PIN or server error.'
+    );
+
+
   } finally {
-    if (button) button.disabled = false;
+
+    if (button){
+
+      button.disabled =
+        false;
+
+    }
+
   }
+
 }
+
+
+/* =====================================================================
+   LOAD REGISTRATIONS
+===================================================================== */
 
 async function loadRegistrations(){
+
   if (!apiReady()) return;
 
+
   try {
-    allRegs = await getAllRegs(currentAdminPin);
+
+    allRegs =
+      await getAllRegs(
+        currentAdminPin
+      );
+
+
     renderStats();
+
     renderTable();
+
+
   } catch (e) {
+
     console.error(e);
-    alert(e.message || 'Could not load registrations.');
+
+
+    alert(
+      e.message ||
+      'Could not load registrations.'
+    );
+
   }
+
 }
+
+
+/* =====================================================================
+   STATS
+===================================================================== */
 
 function renderStats(){
-  const total = allRegs.length;
-  const paid = allRegs.filter(r => r.paid === true).length;
-  const revenue = allRegs
-    .filter(r => r.paid === true)
-    .reduce((sum, r) => sum + (parseFloat(r.amount) || 0), 0);
 
-  document.getElementById('statTotal').textContent = total;
-  document.getElementById('statPaid').textContent = paid;
-  document.getElementById('statRevenue').textContent = '₹' + revenue.toFixed(2);
+  const total =
+    allRegs.length;
+
+
+  const paid =
+    allRegs.filter(
+      r =>
+        r.paid === true
+    ).length;
+
+
+  const revenue =
+    allRegs
+
+      .filter(
+        r =>
+          r.paid === true
+      )
+
+      .reduce(
+        (
+          sum,
+          r
+        ) =>
+          sum +
+          (
+            parseFloat(
+              r.amount
+            ) || 0
+          ),
+        0
+      );
+
+
+  const totalEl =
+    document.getElementById(
+      'statTotal'
+    );
+
+
+  const paidEl =
+    document.getElementById(
+      'statPaid'
+    );
+
+
+  const revenueEl =
+    document.getElementById(
+      'statRevenue'
+    );
+
+
+  if (totalEl)
+    totalEl.textContent =
+      total;
+
+
+  if (paidEl)
+    paidEl.textContent =
+      paid;
+
+
+  if (revenueEl)
+    revenueEl.textContent =
+      '₹' +
+      revenue.toFixed(2);
+
 }
+
+
+/* =====================================================================
+   ADMIN TABLE
+===================================================================== */
 
 function renderTable(){
-  const search = document.getElementById('searchBox').value.trim().toLowerCase();
-  const body = document.getElementById('regBody');
 
-  body.innerHTML = '';
+  const searchBox =
+    document.getElementById(
+      'searchBox'
+    );
+
+
+  const body =
+    document.getElementById(
+      'regBody'
+    );
+
+
+  if (!body) return;
+
+
+  const search =
+    searchBox
+      ? searchBox.value
+          .trim()
+          .toLowerCase()
+      : '';
+
+
+  body.innerHTML =
+    '';
+
 
   allRegs
-    .filter(r => {
-      const name = ((r.firstName || '') + ' ' + (r.lastName || '')).toLowerCase();
-      const phone = String(r.phone || '').toLowerCase();
-      const paymentRef = String(r.paymentRef || '').toLowerCase();
 
-      return name.includes(search) || phone.includes(search) || paymentRef.includes(search);
-    })
-    .forEach((r) => {
-      const tr = document.createElement('tr');
+    .filter(
+      r => {
 
-      const paymentHtml = r.paid
-        ? '<span class="tag paid">Paid ₹' + escapeHtml(r.amount) + '</span>'
-        : '<span class="tag pending">Pending</span>';
+        const name =
 
-      const actionHtml = r.paid
-        ? '<button class="verify-btn" disabled>Verified</button>'
-        : '<button class="verify-btn" onclick="markPaid(\'' + r.id + '\')">Verify & Mark Paid</button>';
+          (
+            (
+              r.firstName ||
+              ''
+            ) +
 
-      const screenshotHtml = r.screenshotUrl
-        ? '<a class="verify-btn" href="' + escapeHtml(r.screenshotUrl) + '" target="_blank" rel="noopener">View</a>'
-        : '-';
+            ' ' +
 
-      tr.innerHTML = `
-        <td>${escapeHtml(r.firstName)}</td>
-        <td>${escapeHtml(r.lastName)}</td>
-        <td>${escapeHtml(r.age)}</td>
-        <td>${escapeHtml(r.jersey)}</td>
-        <td>${escapeHtml(r.phone)}</td>
-        <td>${escapeHtml(r.email)}</td>
-        <td>${escapeHtml(r.role)}</td>
-        <td>${escapeHtml(r.tshirt)}</td>
-        <td>${escapeHtml(r.city)}</td>
-        <td>${escapeHtml(r.paymentRef || '-')}</td>
-        <td>${screenshotHtml}</td>
-        <td>${paymentHtml}</td>
-        <td>${actionHtml}</td>
-      `;
+            (
+              r.lastName ||
+              ''
+            )
 
-      body.appendChild(tr);
-    });
+          ).toLowerCase();
+
+
+        const phone =
+          String(
+            r.phone ||
+            ''
+          ).toLowerCase();
+
+
+        const paymentRef =
+          String(
+            r.paymentRef ||
+            ''
+          ).toLowerCase();
+
+
+        return (
+
+          name.includes(
+            search
+          ) ||
+
+          phone.includes(
+            search
+          ) ||
+
+          paymentRef.includes(
+            search
+          )
+
+        );
+
+      }
+    )
+
+
+    .forEach(
+      r => {
+
+        const tr =
+          document.createElement(
+            'tr'
+          );
+
+
+        const paymentHtml =
+
+          r.paid
+
+            ?
+
+            '<span class="tag paid">Paid ₹' +
+
+            escapeHtml(
+              r.amount
+            ) +
+
+            '</span>'
+
+            :
+
+            '<span class="tag pending">Pending</span>';
+
+
+        const actionHtml =
+
+          r.paid
+
+            ?
+
+            '<button class="verify-btn" disabled>Verified</button>'
+
+            :
+
+            '<button class="verify-btn" onclick="markPaid(\'' +
+
+            escapeHtml(
+              r.id
+            ) +
+
+            '\')">Verify & Mark Paid</button>';
+
+
+        const screenshotHtml =
+
+          r.screenshotUrl
+
+            ?
+
+            '<a class="verify-btn" href="' +
+
+            escapeHtml(
+              r.screenshotUrl
+            ) +
+
+            '" target="_blank" rel="noopener">View</a>'
+
+            :
+
+            '-';
+
+
+        const playerPhotoHtml =
+
+          r.playerPhotoUrl
+
+            ?
+
+            '<a class="verify-btn" href="' +
+
+            escapeHtml(
+              r.playerPhotoUrl
+            ) +
+
+            '" target="_blank" rel="noopener">Photo</a>'
+
+            :
+
+            '-';
+
+
+        tr.innerHTML = `
+
+          <td>
+            ${escapeHtml(r.firstName)}
+          </td>
+
+          <td>
+            ${escapeHtml(r.lastName)}
+          </td>
+
+          <td>
+            ${escapeHtml(r.age)}
+          </td>
+
+          <td>
+            ${escapeHtml(r.jersey)}
+          </td>
+
+          <td>
+            ${escapeHtml(r.phone)}
+          </td>
+
+          <td>
+            ${escapeHtml(r.email)}
+          </td>
+
+          <td>
+            ${escapeHtml(r.role)}
+          </td>
+
+          <td>
+            ${escapeHtml(r.tshirt)}
+          </td>
+
+          <td>
+            ${escapeHtml(r.city)}
+          </td>
+
+          <td>
+            ${playerPhotoHtml}
+          </td>
+
+          <td>
+            ${escapeHtml(
+              r.paymentRef ||
+              '-'
+            )}
+          </td>
+
+          <td>
+            ${screenshotHtml}
+          </td>
+
+          <td>
+            ${paymentHtml}
+          </td>
+
+          <td>
+            ${actionHtml}
+          </td>
+
+        `;
+
+
+        body.appendChild(
+          tr
+        );
+
+      }
+    );
+
 }
 
-async function markPaid(id){
-  const entry = allRegs.find(r => r.id === id);
 
-  if (!entry) {
-    alert('Registration not found.');
+/* =====================================================================
+   MARK PAYMENT PAID
+===================================================================== */
+
+async function markPaid(
+  id
+){
+
+  const entry =
+    allRegs.find(
+      r =>
+        r.id === id
+    );
+
+
+  if (!entry){
+
+    alert(
+      'Registration not found.'
+    );
+
+
     return;
+
   }
 
-  if (!confirm(
-    'Verify payment reference "' + (entry.paymentRef || '-') +
-    '" for ' + (entry.firstName || '') + ' ' + (entry.lastName || '') +
-    ' in your UPI app / bank statement before marking it PAID.'
-  )) return;
+
+  if (
+    !confirm(
+
+      'Verify payment reference "' +
+
+      (
+        entry.paymentRef ||
+        '-'
+      ) +
+
+      '" for ' +
+
+      (
+        entry.firstName ||
+        ''
+      ) +
+
+      ' ' +
+
+      (
+        entry.lastName ||
+        ''
+      ) +
+
+      ' in your UPI app / bank statement before marking it PAID.'
+
+    )
+  ){
+
+    return;
+
+  }
+
 
   try {
-    await verifyRegistration(id, currentAdminPin);
-    alert('Payment verified successfully.');
+
+    await verifyRegistration(
+      id,
+      currentAdminPin
+    );
+
+
+    alert(
+      'Payment verified successfully.'
+    );
+
+
     await loadRegistrations();
+
+
   } catch (e) {
-    alert(e.message || 'Could not verify payment.');
+
+    alert(
+      e.message ||
+      'Could not verify payment.'
+    );
+
   }
+
 }
+
+
+/* =====================================================================
+   EXPORT CSV
+===================================================================== */
 
 function exportCSV(){
+
   const headers = [
-    'ID','First','Last','Age','Jersey','Phone','Email','Role','T-Shirt',
-    'State','City','PaymentRef','ScreenshotUrl','Amount','Paid','PaymentStatus',
-    'RegisteredAt','VerifiedAt'
+
+    'ID',
+    'First',
+    'Last',
+    'Age',
+    'Jersey',
+    'Phone',
+    'Email',
+    'Role',
+    'T-Shirt',
+    'State',
+    'City',
+    'PlayerPhotoUrl',
+    'PaymentRef',
+    'ScreenshotUrl',
+    'Amount',
+    'Paid',
+    'PaymentStatus',
+    'RegisteredAt',
+    'VerifiedAt'
+
   ];
 
-  const rows = allRegs.map(r => [
-    r.id, r.firstName, r.lastName, r.age, r.jersey, r.phone, r.email,
-    r.role, r.tshirt, r.state, r.city, r.paymentRef, r.screenshotUrl, r.amount,
-    r.paid ? 'Yes' : 'No', r.paymentStatus, r.registeredAt, r.verifiedAt || ''
-  ]);
+
+  const rows =
+    allRegs.map(
+      r => [
+
+        r.id,
+
+        r.firstName,
+
+        r.lastName,
+
+        r.age,
+
+        r.jersey,
+
+        r.phone,
+
+        r.email,
+
+        r.role,
+
+        r.tshirt,
+
+        r.state,
+
+        r.city,
+
+        r.playerPhotoUrl ||
+        '',
+
+        r.paymentRef,
+
+        r.screenshotUrl,
+
+        r.amount,
+
+        r.paid
+          ? 'Yes'
+          : 'No',
+
+        r.paymentStatus,
+
+        r.registeredAt,
+
+        r.verifiedAt ||
+        ''
+
+      ]
+    );
+
 
   const csv =
-    headers.join(',') + '\n' +
-    rows.map(row =>
-      row.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')
-    ).join('\n');
 
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
+    headers.join(',') +
 
-  a.href = url;
-  a.download = 'mpl-registrations-2027.csv';
-  document.body.appendChild(a);
+    '\n' +
+
+    rows
+
+      .map(
+        row =>
+
+          row
+
+            .map(
+              v =>
+
+                `"${String(
+                  v ??
+                  ''
+                ).replace(
+                  /"/g,
+                  '""'
+                )}"`
+            )
+
+            .join(',')
+
+      )
+
+      .join('\n');
+
+
+  const blob =
+    new Blob(
+      [csv],
+      {
+        type:
+          'text/csv;charset=utf-8;'
+      }
+    );
+
+
+  const url =
+    URL.createObjectURL(
+      blob
+    );
+
+
+  const a =
+    document.createElement(
+      'a'
+    );
+
+
+  a.href =
+    url;
+
+
+  a.download =
+    'mpl-registrations-2027.csv';
+
+
+  document.body.appendChild(
+    a
+  );
+
+
   a.click();
+
+
   a.remove();
 
-  URL.revokeObjectURL(url);
+
+  URL.revokeObjectURL(
+    url
+  );
+
 }
 
-function escapeHtml(str){
-  const div = document.createElement('div');
-  div.textContent = str == null ? '' : String(str);
+
+/* =====================================================================
+   ESCAPE HTML
+===================================================================== */
+
+function escapeHtml(
+  str
+){
+
+  const div =
+    document.createElement(
+      'div'
+    );
+
+
+  div.textContent =
+    str == null
+      ? ''
+      : String(str);
+
+
   return div.innerHTML;
+
 }
 
-/* Cursor/click heart effects */
-let lastHeart = 0;
 
-document.addEventListener('mousemove', function(e){
-  const now = Date.now();
+/* =====================================================================
+   HEART / CLICK EFFECTS
+===================================================================== */
 
-  if (now - lastHeart < 55) return;
-  lastHeart = now;
+let lastHeart =
+  0;
 
-  const h = document.createElement('div');
-  h.className = 'heart-particle';
-  h.textContent = '♥';
-  h.style.left = e.clientX + 'px';
-  h.style.top = e.clientY + 'px';
-  h.style.setProperty('--dx', (Math.random() * 20 - 10) + 'px');
 
-  document.body.appendChild(h);
-  setTimeout(() => h.remove(), 900);
-});
+document.addEventListener(
+  'mousemove',
+  function(e){
 
-document.addEventListener('click', function(e){
-  ['left', 'right'].forEach(side => {
-    const h = document.createElement('div');
-    h.className = 'heart-half ' + side;
-    h.textContent = '♥';
-    h.style.left = e.clientX + 'px';
-    h.style.top = e.clientY + 'px';
+    const now =
+      Date.now();
 
-    document.body.appendChild(h);
-    setTimeout(() => h.remove(), 900);
-  });
-});
 
-document.addEventListener('DOMContentLoaded', function(){
-  generateUpiQr();
-});
+    if (
+      now -
+      lastHeart <
+      55
+    ){
 
+      return;
+
+    }
+
+
+    lastHeart =
+      now;
+
+
+    const h =
+      document.createElement(
+        'div'
+      );
+
+
+    h.className =
+      'heart-particle';
+
+
+    h.textContent =
+      '♥';
+
+
+    h.style.left =
+      e.clientX +
+      'px';
+
+
+    h.style.top =
+      e.clientY +
+      'px';
+
+
+    h.style.setProperty(
+      '--dx',
+      (
+        Math.random() *
+        20 -
+        10
+      ) +
+      'px'
+    );
+
+
+    document.body.appendChild(
+      h
+    );
+
+
+    setTimeout(
+      () =>
+        h.remove(),
+      900
+    );
+
+  }
+);
+
+
+document.addEventListener(
+  'click',
+  function(e){
+
+    [
+      'left',
+      'right'
+    ].forEach(
+      side => {
+
+        const h =
+          document.createElement(
+            'div'
+          );
+
+
+        h.className =
+          'heart-half ' +
+          side;
+
+
+        h.textContent =
+          '♥';
+
+
+        h.style.left =
+          e.clientX +
+          'px';
+
+
+        h.style.top =
+          e.clientY +
+          'px';
+
+
+        document.body.appendChild(
+          h
+        );
+
+
+        setTimeout(
+          () =>
+            h.remove(),
+          900
+        );
+
+      }
+    );
+
+  }
+);
+
+
+/* =====================================================================
+   PAGE LOAD
+===================================================================== */
+
+document.addEventListener(
+  'DOMContentLoaded',
+  function(){
+
+    generateUpiQr();
+
+  }
+);
